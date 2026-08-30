@@ -16,9 +16,21 @@ render_all_configs
 
 bash -n "$INSTALLER"
 bash -n "${STAGING_DIR}/kickpi-ustreamer-start"
+python3 -c 'import pathlib,sys; p=pathlib.Path(sys.argv[1]); compile(p.read_bytes(), str(p), "exec")' \
+    "${STAGING_DIR}/kickpi-camera-gateway"
 
 grep -qF 'listen 80 default_server;' "${STAGING_DIR}/kickpi-printer.conf"
+grep -qF 'listen 8080;' "${STAGING_DIR}/kickpi-printer.conf"
+grep -qF 'auth_request /_kickpi_camera_wake;' "${STAGING_DIR}/kickpi-printer.conf"
+grep -qF 'proxy_pass http://127.0.0.1:18081;' "${STAGING_DIR}/kickpi-printer.conf"
 grep -qF 'proxy_set_header Origin http://192.168.50.20;' "${STAGING_DIR}/kickpi-printer.conf"
+grep -qF 'CONFIGURED_DEVICE=""' "${STAGING_DIR}/kickpi-ustreamer-start"
+grep -qF 'SLOWDOWN_ARGS=(--slowdown)' "${STAGING_DIR}/kickpi-ustreamer-start"
+grep -qF -- '--host=127.0.0.1' "${STAGING_DIR}/kickpi-ustreamer-start"
+grep -qF 'CONTROL_HOST = "127.0.0.1"' "${STAGING_DIR}/kickpi-camera-gateway"
+grep -qF 'def backend_online():' "${STAGING_DIR}/kickpi-camera-gateway"
+grep -qF 'IDLE_MODE = "stop"' "${STAGING_DIR}/kickpi-camera-gateway"
+grep -qF 'IDLE_TIMEOUT = 300' "${STAGING_DIR}/kickpi-camera-gateway"
 grep -qF 'dhcp-range=192.168.50.20,192.168.50.20,255.255.255.0,24h' \
     "${STAGING_DIR}/kickpi-printer-lan.conf"
 grep -qF 'masquerade' "${STAGING_DIR}/printer-nat.nft"

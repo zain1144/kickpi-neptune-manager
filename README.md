@@ -10,7 +10,7 @@ The installer builds the complete KickPi side from a clean Ubuntu installation:
 - Enables IPv4 forwarding and nftables NAT so the printer can reach the internet through Wi-Fi.
 - Installs an Nginx reverse proxy on standard HTTP port `80`.
 - Fixes the `Origin: file://` WebSocket incompatibility seen with newer ElegooSlicer releases.
-- Optionally installs a USB camera service using `ustreamer` on port `8080`.
+- Optionally installs an on-demand USB camera gateway on port `8080`: it starts `ustreamer` for the first viewer and stops capture after a configurable idle timeout.
 - Creates timestamped backups and automatically rolls managed configuration back when installation fails after files are changed.
 - Provides status, dry-run, and proxy-only repair commands.
 
@@ -141,6 +141,16 @@ Repair only the port-80 Nginx proxy:
 ./kickpi_neptune_setup.sh apply
 ```
 
+Control and inspect the camera:
+
+```bash
+./kickpi_neptune_setup.sh camera detect
+./kickpi_neptune_setup.sh camera status
+./kickpi_neptune_setup.sh camera start
+./kickpi_neptune_setup.sh camera stop
+./kickpi_neptune_setup.sh camera restart
+```
+
 Show help and version:
 
 ```bash
@@ -162,6 +172,8 @@ CAMERA_ENABLED=yes \
 CAMERA_PORT=8080 \
 CAMERA_RESOLUTION=1280x720 \
 CAMERA_FPS=30 \
+CAMERA_IDLE_MODE=stop \
+CAMERA_IDLE_TIMEOUT=300 \
 ./kickpi_neptune_setup.sh install --dry-run
 ```
 
@@ -197,6 +209,10 @@ The local `kickpi-neptune.env` file is ignored by Git.
 | `CAMERA_PORT` | `8080` | Camera HTTP port |
 | `CAMERA_RESOLUTION` | `1280x720` | Camera resolution |
 | `CAMERA_FPS` | `30` | Desired camera frame rate |
+| `CAMERA_IDLE_MODE` | `stop` | `stop`, `slowdown`, or `always` behavior when nobody is watching |
+| `CAMERA_IDLE_TIMEOUT` | `300` | Seconds with no active stream connection before stopping capture in `stop` mode |
+| `CAMERA_CONTROL_PORT` | `18080` | Loopback-only gateway control port |
+| `CAMERA_BACKEND_PORT` | `18081` | Loopback-only `ustreamer` backend port |
 | `SKIP_APT` | `no` | Skip APT only when all dependencies are already installed |
 | `PRINTER_WAIT_SECONDS` | `60` | Maximum post-install wait for Moonraker |
 
@@ -204,13 +220,34 @@ Only `/24` printer subnets are supported by this release.
 
 ## Camera behavior
 
-When `CAMERA_ENABLED=yes` and `CAMERA_DEVICE` is empty, the installer chooses the first stable device matching:
+The default `CAMERA_IDLE_MODE=stop` behavior is:
+
+1. Nginx remains available on the public camera port `8080`.
+2. A request from Fluidd or a browser asks the loopback-only gateway to start `ustreamer`.
+3. Nginx proxies the unchanged camera URL to the internal backend.
+4. While a stream connection is active, the backend remains running.
+5. When all stream connections have closed, `ustreamer` uses `--slowdown` during the grace period and is stopped after `CAMERA_IDLE_TIMEOUT` seconds.
+6. The next camera request starts it automatically again.
+
+Fluidd camera URLs do not need to change. The first frame after a cold start may take one or two seconds. Merely configuring a webcam in Fluidd does not count as a viewer; an actual stream or snapshot request wakes it.
+
+`CAMERA_IDLE_MODE=slowdown` keeps the backend open and relies on `ustreamer --slowdown`. `CAMERA_IDLE_MODE=always` keeps full-rate capture running.
+
+When `CAMERA_DEVICE` is empty, the launcher detects the camera every time capture starts. It first chooses a stable device matching:
 
 ```text
 /dev/v4l/by-id/*-video-index0
 ```
 
-If no camera is connected during installation, it configures `/dev/video0`; the systemd service remains active and waits until that device appears.
+If there is no by-id match, it tries `/dev/video0`. If no camera is present, the backend waits; later connecting a UVC/V4L2 camera is enough. Replacing a USB camera normally requires only:
+
+```bash
+./kickpi_neptune_setup.sh camera restart
+```
+
+Use `CAMERA_DEVICE` only when more than one camera is attached and a specific device must be selected. Cameras that do not expose a V4L2 device, such as many CSI or IP cameras, require a different backend.
+
+`camera stop` creates a manual pause that blocks automatic wake until `camera start`. The pause lasts until it is resumed or the KickPi reboots. Stopping capture closes the V4L2 device and usually turns off the camera LED, but USB power remains connected.
 
 To disable camera installation:
 
@@ -250,6 +287,8 @@ The full installer owns these paths:
 /etc/sysctl.d/99-kickpi-printer.conf
 /usr/local/sbin/kickpi-ustreamer-start
 /etc/systemd/system/kickpi-ustreamer.service
+/usr/local/sbin/kickpi-camera-gateway
+/etc/systemd/system/kickpi-camera-gateway.service
 ```
 
 It migrates the old `/etc/netplan/10-kickpi-neptune.yaml`, disables the Ubuntu default Nginx site, and removes the known old standard proxy file when present.
@@ -279,7 +318,8 @@ Run:
 sudo nginx -t
 sudo dnsmasq --test
 sudo netplan generate
-systemctl --no-pager --full status kickpi-printer-nat dnsmasq nginx kickpi-ustreamer
+systemctl --no-pager --full status kickpi-printer-nat dnsmasq nginx kickpi-camera-gateway kickpi-ustreamer
+journalctl --no-pager -u kickpi-camera-gateway -u kickpi-ustreamer -n 100
 ```
 
 Useful network checks:
@@ -296,6 +336,7 @@ If the printer is not assigned `192.168.50.20`, power-cycle the printer after co
 ## Security
 
 - The proxy and camera are intended for a trusted home LAN.
+- The privileged camera controller listens only on `127.0.0.1`; its Nginx wake location is marked `internal` and cannot accept arbitrary commands.
 - The installer does not add authentication or TLS.
 - Never forward ports `80` or `8080` from the internet router.
 - Never commit Wi-Fi credentials, SSH passwords, Moonraker credentials, `printer.cfg`, `moonraker.conf`, or private backups.
@@ -337,7 +378,7 @@ chmod +x kickpi_neptune_setup.sh
 
 السكربت لا يغيّر إعدادات أو كلمة مرور Wi-Fi. يجب الاتصال بالـWi-Fi أولاً والدخول إلى KickPi عبر عنوان Wi-Fi قبل تشغيل التثبيت.
 
-التثبيت الكامل يضبط `eth0` وDHCP وNAT وNginx على المنفذ `80` والكاميرا اختيارياً على `8080`. عند فشل التثبيت بعد تعديل الملفات، يعيد الملفات والخدمات التي يديرها إلى حالتها السابقة.
+التثبيت الكامل يضبط `eth0` وDHCP وNAT وNginx على المنفذ `80` والكاميرا اختيارياً على `8080`. وضع الكاميرا الافتراضي يشغّل الالتقاط تلقائياً عند فتحها من Fluidd، ثم يوقفه بعد خمس دقائق بلا مشاهدين، مع بقاء رابط `8080` نفسه. عند تبديل كاميرا USB يعاد اكتشافها في كل تشغيل، ويمكن تنفيذ `./kickpi_neptune_setup.sh camera restart`. عند فشل التثبيت بعد تعديل الملفات، يعيد الملفات والخدمات التي يديرها إلى حالتها السابقة.
 
 للفحص لاحقاً:
 
