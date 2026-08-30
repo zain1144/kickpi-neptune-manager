@@ -1,0 +1,18 @@
+# Local backups and logs
+*.bak
+*.bak-*
+*.bk
+*.log
+
+# Printer and service configurations may contain private data
+*.cfg
+*.conf
+
+# Machine-specific full installer backup
+kickpi_neptune_setup.legacy-8081.sh
+
+# Editor and OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
