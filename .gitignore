@@ -11,6 +11,10 @@
 # Machine-specific full installer backup
 kickpi_neptune_setup.legacy-8081.sh
 
+# Local environment overrides
+kickpi-neptune.env
+.env
+
 # Editor and OS files
 .DS_Store
 Thumbs.db

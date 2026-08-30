@@ -1,203 +1,352 @@
 # KickPi Neptune Manager
 
-A small Bash manager for exposing an Elegoo Neptune printer through a KickPi on standard HTTP port `80`.
+Standalone bootstrap and recovery installer for connecting an Elegoo Neptune printer to a KickPi over a dedicated Ethernet cable.
 
-It is designed for a setup where:
+The installer builds the complete KickPi side from a clean Ubuntu installation:
 
-- KickPi connects to the home network through Wi-Fi.
-- The Elegoo Neptune printer connects directly to KickPi through Ethernet.
-- Moonraker is available on the printer.
-- Nginx on KickPi proxies the printer to the home network.
-- A camera service may continue using port `8080`.
+- Preserves the existing Wi-Fi connection and credentials.
+- Configures the printer-side Ethernet interface with a static address.
+- Installs and configures `dnsmasq` to give the printer a fixed address.
+- Enables IPv4 forwarding and nftables NAT so the printer can reach the internet through Wi-Fi.
+- Installs an Nginx reverse proxy on standard HTTP port `80`.
+- Fixes the `Origin: file://` WebSocket incompatibility seen with newer ElegooSlicer releases.
+- Optionally installs a USB camera service using `ustreamer` on port `8080`.
+- Creates timestamped backups and automatically rolls managed configuration back when installation fails after files are changed.
+- Provides status, dry-run, and proxy-only repair commands.
 
-The script also works around a WebSocket compatibility issue in newer ElegooSlicer releases. ElegooSlicer can send `Origin: file://`, which Moonraker rejects with HTTP `403`; the generated Nginx configuration supplies the printer's accepted internal origin upstream.
+No separate legacy installer is required.
+
+## Tested platform
+
+- KickPi K2B.
+- Ubuntu `22.04.5 LTS` (`aarch64`).
+- NetworkManager with Netplan.
+- Elegoo Neptune 4 Pro running OpenNeptune/Moonraker.
+- KickPi connected to the home network through Wi-Fi.
+- Printer connected directly to KickPi through Ethernet.
+- USB UVC camera with `ustreamer`.
+
+Other Ubuntu releases produce a warning and should be tested with `install --dry-run` first. Non-Ubuntu distributions are rejected intentionally.
 
 ## Default network layout
 
-| Component | Default value |
+| Component | Default |
 | --- | --- |
-| KickPi Wi-Fi interface | `wlan0` |
-| KickPi Ethernet interface | `eth0` |
-| KickPi printer-side address | `192.168.50.1` |
+| KickPi home-network interface | `wlan0` using existing Wi-Fi/DHCP |
+| KickPi printer interface | `eth0` |
+| KickPi printer-side address | `192.168.50.1/24` |
 | Printer address | `192.168.50.20` |
-| Printer URL on the home LAN | `http://<KICKPI-WIFI-IP>/` |
-| Optional camera URL | `http://<KICKPI-WIFI-IP>:8080/` |
-| Old printer proxy port | `8081` disabled |
+| Printer URL from the home LAN | `http://<KICKPI-WIFI-IP>/` |
+| Camera URL | `http://<KICKPI-WIFI-IP>:8080/` |
+| Legacy printer port | `8081` disabled |
 
-The Wi-Fi address is detected automatically. Interface names and printer addresses can be overridden with environment variables.
+The home Wi-Fi network must not also use `192.168.50.0/24`. The preflight check refuses overlapping networks.
 
-## Requirements
+## Fresh-install prerequisites
 
-- A Debian or Ubuntu based KickPi installation.
-- An already configured direct Ethernet connection between KickPi and the printer.
-- `nginx`, `curl`, `ip`, `ss`, `sudo`, and `systemctl`.
-- Moonraker reachable from KickPi at `http://192.168.50.20/` by default.
-- Run the script over the Wi-Fi SSH connection, not through the printer-side Ethernet interface.
+Before running the script on a newly installed KickPi:
 
-## Installation
+1. Install Ubuntu 22.04 for the KickPi.
+2. Connect the KickPi to your Wi-Fi network.
+3. Confirm that NetworkManager is active:
 
-Clone the repository and install the script:
+   ```bash
+   systemctl is-active NetworkManager
+   ```
+
+4. Find the Wi-Fi address:
+
+   ```bash
+   ip -4 -br addr show wlan0
+   ```
+
+5. Connect through that Wi-Fi address using SSH.
+6. Connect the printer directly to `eth0`.
+7. Connect the USB camera if camera support is wanted.
+
+The installer deliberately does not ask for, store, or modify Wi-Fi credentials. Establish Wi-Fi before using it.
+
+## Download
 
 ```bash
+sudo apt-get update
+sudo apt-get install -y git
 git clone https://github.com/zain1144/kickpi-neptune-manager.git
 cd kickpi-neptune-manager
 chmod +x kickpi_neptune_setup.sh
-sudo install -m 0755 kickpi_neptune_setup.sh /home/kickpi/kickpi_neptune_setup.sh
 ```
 
-Replace `zain1144` with your GitHub username.
+## Validate before changing anything
 
-The script does not contain SSH passwords, Moonraker tokens, or printer configuration files.
-
-## Usage
-
-Open the interactive menu:
+Run the complete generation and configuration validation path without writing to `/etc` or restarting services:
 
 ```bash
-/home/kickpi/kickpi_neptune_setup.sh
+./kickpi_neptune_setup.sh install --dry-run
 ```
 
-Check the setup without changing anything:
-
-```bash
-/home/kickpi/kickpi_neptune_setup.sh status
-```
-
-Apply or repair the port-80 proxy:
-
-```bash
-/home/kickpi/kickpi_neptune_setup.sh apply
-```
-
-The `apply` command automatically requests `sudo`, creates an Nginx backup, validates the new configuration with `nginx -t`, and reloads Nginx. If the reload fails, it restores the previous configuration and reports failure.
-
-Show command help:
-
-```bash
-/home/kickpi/kickpi_neptune_setup.sh help
-```
-
-## Full-install command
-
-The manager contains an optional `install` command intended for the original machine on which a verified legacy full-setup backup already exists at:
+The script automatically requests `sudo`. A successful result ends with:
 
 ```text
-/home/kickpi/kickpi_neptune_setup.legacy-8081.sh
+Dry run successful. No system files or services were changed.
 ```
 
-That private legacy backup is deliberately not included in this repository. It changes Netplan, DHCP, NAT, camera services, and installed packages. For normal use and proxy repair, use `status` and `apply`; they do not require the legacy installer.
+The dry run renders all files and validates generated Netplan, dnsmasq, nftables, Nginx, and camera-launcher content using the tools already installed on the machine. Installed systemd units are additionally checked during the real transaction before services start. On a completely clean image, install the runtime packages first or proceed with the confirmed full installer, which installs them automatically.
 
-Do not run `install` on a fresh machine unless you have reviewed and supplied your own compatible full-setup script. The manager applies the port-80 configuration after that installer completes.
+## Full standalone installation
 
-## Custom addresses and interfaces
-
-Override defaults for one command by supplying environment variables:
+Run interactively:
 
 ```bash
-WIFI_IF=wlan0 \
-ETH_IF=eth0 \
-LAN_IP=192.168.50.1 \
-PRINTER_IP=192.168.50.20 \
-./kickpi_neptune_setup.sh status
+./kickpi_neptune_setup.sh install
 ```
 
-The same variables are preserved when the script requests `sudo`.
-
-## What `status` verifies
-
-The status test checks:
-
-1. The Wi-Fi and Ethernet addresses.
-2. Listeners on ports `80`, `8080`, and `8081`.
-3. Moonraker's `/server/info` endpoint and Klipper's `ready` state.
-4. Creation of a Moonraker one-shot token.
-5. A real WebSocket upgrade using `Origin: file://`.
-6. That port `8081` is no longer listening.
-
-A successful result ends with output similar to:
-
-```text
-Moonraker: ready
-WebSocket: 101 Switching Protocols
-Printer URL: http://192.168.x.x/
-Port 8081: disabled
-```
-
-## Nginx backups and rollback
-
-Before replacing the active proxy configuration, the script stores a timestamped backup under:
-
-```text
-/etc/nginx/kickpi-neptune-backups/
-```
-
-It validates the generated configuration before reload. If reload fails, the previous configuration is restored and reloaded where possible.
-
-## ElegooSlicer
-
-Add the printer using only the KickPi Wi-Fi address without `:8081`:
-
-```text
-http://<KICKPI-WIFI-IP>/
-```
-
-Example:
-
-```text
-http://192.168.1.50/
-```
-
-If ElegooSlicer still reports `Connection failed`:
+Review the displayed interfaces and addresses, then confirm. For non-interactive installation after reviewing the configuration:
 
 ```bash
-./kickpi_neptune_setup.sh status
-sudo nginx -t
-systemctl is-active nginx
+./kickpi_neptune_setup.sh install --yes
 ```
 
-Also confirm that the printer itself is powered on and Moonraker reports Klipper as `ready`.
+The full installer performs these phases:
 
-## Security
+1. Validates addresses, interfaces, operating system, NetworkManager, Wi-Fi connectivity, and SSH path.
+2. Refuses to continue if SSH is connected through an address other than the current Wi-Fi address.
+3. Creates a backup under `/root/kickpi-neptune-backups/`.
+4. Installs required Ubuntu packages.
+5. Generates all configuration in a private temporary directory.
+6. Syntax-checks generated configuration before touching the active files.
+7. Installs Netplan, DHCP, NAT, Nginx, systemd, sysctl, and optional camera files.
+8. Validates the installed configuration and installed systemd units again.
+9. Applies the Ethernet configuration and starts/enables the services.
+10. Verifies services, forwarding, nftables, ports, Moonraker, and the ElegooSlicer-compatible WebSocket handshake.
 
-The proxy is intended for a trusted home LAN. It does not add authentication or TLS. Do not forward port `80` from your internet router and do not expose the printer directly to the public internet.
+If a failure occurs after managed files are changed, the installer restores the previous managed files and service states. Packages installed by APT are intentionally not removed during rollback.
 
-Do not commit SSH passwords, Moonraker credentials, `printer.cfg`, `moonraker.conf`, or private backups to GitHub.
+## Normal usage
 
-## Tested setup
+Open the menu:
 
-- Elegoo Neptune 4 Pro with OpenNeptune.
-- KickPi connected to the home network over Wi-Fi and directly to the printer over Ethernet.
-- Printer at `192.168.50.20`.
-- Nginx printer proxy on port `80`.
-- Camera retained on port `8080`.
-- WebSocket handshake verified as `101 Switching Protocols` with `Origin: file://`.
+```bash
+./kickpi_neptune_setup.sh
+```
 
-## License
-
-No license has been selected yet. Add a license before inviting public reuse or contributions.
-
----
-
-## العربية
-
-هذا السكربت يتيح الوصول إلى طابعة Elegoo Neptune عبر عنوان Wi-Fi الخاص بجهاز KickPi على المنفذ القياسي `80`، مع إبقاء الكاميرا على `8080` وتعطيل المنفذ القديم `8081`.
-
-للفحص فقط:
+Check the complete setup without changing it:
 
 ```bash
 ./kickpi_neptune_setup.sh status
 ```
 
-لتطبيق أو إصلاح إعداد Nginx:
+Repair only the port-80 Nginx proxy:
 
 ```bash
 ./kickpi_neptune_setup.sh apply
 ```
 
-عنوان الطابعة داخل ElegooSlicer يكون:
+Show help and version:
 
-```text
-http://<عنوان-Wi-Fi-الخاص-KickPi>/
+```bash
+./kickpi_neptune_setup.sh help
+./kickpi_neptune_setup.sh version
 ```
 
-لا ترفع النسخة القديمة أو كلمات مرور SSH أو ملفات إعداد Klipper وMoonraker إلى GitHub.
+## Configuration overrides
+
+Defaults can be overridden for one installation with environment variables. The script preserves them when requesting `sudo`.
+
+```bash
+WIFI_IF=wlan0 \
+ETH_IF=eth0 \
+LAN_CIDR=192.168.50.1/24 \
+LAN_IP=192.168.50.1 \
+PRINTER_IP=192.168.50.20 \
+CAMERA_ENABLED=yes \
+CAMERA_PORT=8080 \
+CAMERA_RESOLUTION=1280x720 \
+CAMERA_FPS=30 \
+./kickpi_neptune_setup.sh install --dry-run
+```
+
+After a successful dry run, repeat the same variables with `install`.
+
+An example is provided in [`kickpi-neptune.env.example`](kickpi-neptune.env.example):
+
+```bash
+cp kickpi-neptune.env.example kickpi-neptune.env
+nano kickpi-neptune.env
+set -a
+source ./kickpi-neptune.env
+set +a
+./kickpi_neptune_setup.sh install --dry-run
+./kickpi_neptune_setup.sh install
+```
+
+The local `kickpi-neptune.env` file is ignored by Git.
+
+### Available variables
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `WIFI_IF` | `wlan0` | Home-network Wi-Fi interface |
+| `ETH_IF` | `eth0` | Direct printer Ethernet interface |
+| `LAN_CIDR` | `192.168.50.1/24` | KickPi address and printer subnet |
+| `LAN_IP` | Address part of `LAN_CIDR` | KickPi gateway on the printer LAN |
+| `PRINTER_IP` | `192.168.50.20` | Address leased to the printer |
+| `PRINTER_MAC` | empty | Optional printer MAC for an explicit DHCP host entry |
+| `DHCP_LEASE` | `24h` | dnsmasq lease duration |
+| `CAMERA_ENABLED` | `yes` | Set to `no` to omit/disable the camera service |
+| `CAMERA_DEVICE` | auto-detected | Stable V4L by-id device, or `/dev/video0` fallback |
+| `CAMERA_PORT` | `8080` | Camera HTTP port |
+| `CAMERA_RESOLUTION` | `1280x720` | Camera resolution |
+| `CAMERA_FPS` | `30` | Desired camera frame rate |
+| `SKIP_APT` | `no` | Skip APT only when all dependencies are already installed |
+| `PRINTER_WAIT_SECONDS` | `60` | Maximum post-install wait for Moonraker |
+
+Only `/24` printer subnets are supported by this release.
+
+## Camera behavior
+
+When `CAMERA_ENABLED=yes` and `CAMERA_DEVICE` is empty, the installer chooses the first stable device matching:
+
+```text
+/dev/v4l/by-id/*-video-index0
+```
+
+If no camera is connected during installation, it configures `/dev/video0`; the systemd service remains active and waits until that device appears.
+
+To disable camera installation:
+
+```bash
+CAMERA_ENABLED=no ./kickpi_neptune_setup.sh install --dry-run
+CAMERA_ENABLED=no ./kickpi_neptune_setup.sh install
+```
+
+## ElegooSlicer compatibility
+
+Use only the KickPi Wi-Fi URL, without `:8081`:
+
+```text
+http://<KICKPI-WIFI-IP>/
+```
+
+Newer ElegooSlicer releases may initiate the WebSocket with `Origin: file://`. Moonraker can reject that origin with HTTP `403`. The generated Nginx configuration presents `http://<PRINTER_IP>` upstream, while retaining the WebSocket upgrade headers.
+
+The `status` command obtains a Moonraker one-shot token and performs a real handshake. Success includes:
+
+```text
+Moonraker: ready
+WebSocket: 101 Switching Protocols
+Port 8081: disabled
+```
+
+## Files managed on KickPi
+
+The full installer owns these paths:
+
+```text
+/etc/netplan/99-kickpi-neptune.yaml
+/etc/dnsmasq.d/kickpi-printer-lan.conf
+/etc/nginx/conf.d/kickpi-printer.conf
+/etc/kickpi/printer-nat.nft
+/etc/systemd/system/kickpi-printer-nat.service
+/etc/sysctl.d/99-kickpi-printer.conf
+/usr/local/sbin/kickpi-ustreamer-start
+/etc/systemd/system/kickpi-ustreamer.service
+```
+
+It migrates the old `/etc/netplan/10-kickpi-neptune.yaml`, disables the Ubuntu default Nginx site, and removes the known old standard proxy file when present.
+
+## Backups and rollback
+
+Full-install backups:
+
+```text
+/root/kickpi-neptune-backups/<timestamp>-<pid>/
+```
+
+Proxy-only backups:
+
+```text
+/etc/nginx/kickpi-neptune-backups/<timestamp>-<pid>/
+```
+
+Backups contain only the managed files, previous service states, and diagnostic network information. They do not contain Wi-Fi passwords.
+
+## Troubleshooting
+
+Run:
+
+```bash
+./kickpi_neptune_setup.sh status
+sudo nginx -t
+sudo dnsmasq --test
+sudo netplan generate
+systemctl --no-pager --full status kickpi-printer-nat dnsmasq nginx kickpi-ustreamer
+```
+
+Useful network checks:
+
+```bash
+ip -4 -br addr
+ip route
+ip neigh show dev eth0
+sudo nft list table inet kickpi_printer
+```
+
+If the printer is not assigned `192.168.50.20`, power-cycle the printer after confirming the Ethernet cable and dnsmasq service. Supplying `PRINTER_MAC` makes the intended lease explicit.
+
+## Security
+
+- The proxy and camera are intended for a trusted home LAN.
+- The installer does not add authentication or TLS.
+- Never forward ports `80` or `8080` from the internet router.
+- Never commit Wi-Fi credentials, SSH passwords, Moonraker credentials, `printer.cfg`, `moonraker.conf`, or private backups.
+- Run the full installer only while connected to the KickPi Wi-Fi address.
+
+## Repository smoke test
+
+On an already configured test KickPi, the included smoke test renders and validates the generated files without installing them:
+
+```bash
+sudo bash tests/smoke.sh
+```
+
+## References
+
+- [Netplan configuration guides](https://netplan.readthedocs.io/en/stable/howto/)
+- [Netplan NetworkManager configuration](https://netplan.readthedocs.io/en/latest/nm-all/)
+- [Ubuntu DHCP overview](https://ubuntu.com/server/docs/explanation/networking/about-dhcp/)
+- [Ubuntu 22.04 dnsmasq manual](https://manpages.ubuntu.com/manpages/jammy/man8/dnsmasq.8.html)
+- [nftables manual](https://www.netfilter.org/projects/nftables/manpage.html)
+
+## License
+
+No license has been selected yet. Add a license before inviting public redistribution or contributions.
+
+---
+
+## العربية — الاستعادة السريعة
+
+هذا الإصدار مثبت مستقل ولا يحتاج إلى سكربت `legacy-8081`. بعد تثبيت Ubuntu 22.04 وتوصيل KickPi بالـWi-Fi:
+
+```bash
+git clone https://github.com/zain1144/kickpi-neptune-manager.git
+cd kickpi-neptune-manager
+chmod +x kickpi_neptune_setup.sh
+./kickpi_neptune_setup.sh install --dry-run
+./kickpi_neptune_setup.sh install
+```
+
+السكربت لا يغيّر إعدادات أو كلمة مرور Wi-Fi. يجب الاتصال بالـWi-Fi أولاً والدخول إلى KickPi عبر عنوان Wi-Fi قبل تشغيل التثبيت.
+
+التثبيت الكامل يضبط `eth0` وDHCP وNAT وNginx على المنفذ `80` والكاميرا اختيارياً على `8080`. عند فشل التثبيت بعد تعديل الملفات، يعيد الملفات والخدمات التي يديرها إلى حالتها السابقة.
+
+للفحص لاحقاً:
+
+```bash
+./kickpi_neptune_setup.sh status
+```
+
+لإصلاح Nginx فقط:
+
+```bash
+./kickpi_neptune_setup.sh apply
+```
